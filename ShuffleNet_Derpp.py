@@ -13,8 +13,8 @@ from torch.nn import functional as F
 from torchvision import datasets, transforms
 
 # Define constants
-BATCH_SIZE = 1
-NUM_EPOCHS = 1
+BATCH_SIZE = 1024
+NUM_EPOCHS = 30
 LEARNING_RATE = 0.001
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 BUFFER_SIZE = 1000  # Define buffer size
