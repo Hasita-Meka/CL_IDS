@@ -16,11 +16,9 @@ import optuna  # For BO-TPE
 NUM_EPOCHS = 30
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-
 # Buffer Class for Dark Experience Replay
 class Buffer:
     """Buffer to store past experiences for Dark Experience Replay."""
-
     def __init__(self, size):
         self.size = size
         self.buffer = []
@@ -48,11 +46,9 @@ class Buffer:
         """Check if the buffer is empty."""
         return len(self.buffer) == 0
 
-
 # Dark Experience Replay Class
 class Der:
     """Continual learning via Dark Experience Replay."""
-
     def __init__(self, model, buffer_size, alpha, lr):
         self.model = model
         self.buffer = Buffer(buffer_size)
@@ -82,7 +78,6 @@ class Der:
         self.buffer.add_data(examples=inputs.detach(), logits=outputs.data)
         return tot_loss
 
-
 # Data Augmentation and Normalization
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -96,7 +91,6 @@ test_dir = 'Dataset/test'
 # Load datasets
 train_data = datasets.ImageFolder(train_dir, transform=transform)
 test_data = datasets.ImageFolder(test_dir, transform=transform)
-
 
 # Training and evaluation functions
 def train_model_with_der(model, train_loader, num_epochs, buffer_size, alpha, lr):
@@ -116,7 +110,6 @@ def train_model_with_der(model, train_loader, num_epochs, buffer_size, alpha, lr
         train_loss.append(avg_loss)
         print(f'Epoch [{epoch + 1}/{num_epochs}], Loss: {avg_loss:.4f}')
     return train_loss
-
 
 def evaluate_model(model, test_loader):
     model.eval()
@@ -144,16 +137,15 @@ def evaluate_model(model, test_loader):
 
     return avg_loss, accuracy, f1, precision, recall, auc_roc, cm
 
-
 # Bayesian Optimization with BO-TPE using Optuna
 def objective(trial):
     # Hyperparameters to tune
     buffer_size = trial.suggest_int('buffer_size', 500, 2000)
     alpha = trial.suggest_float('alpha', 0.1, 1.0)
     lr = trial.suggest_float('lr', 1e-5, 1e-3, log=True)
-    batch_size = trial.suggest_categorical('batch_size', [64, 128, 256, 512, 1024])
-
-    # Loaders with the suggested batch size
+    batch_size = 1024  # Set batch size to 1024 directly
+    
+    # Loaders with the specified batch size
     train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
     test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False)
 
@@ -166,9 +158,8 @@ def objective(trial):
     # Train and evaluate the model
     train_loss = train_model_with_der(model, train_loader, NUM_EPOCHS, buffer_size, alpha, lr)
     avg_loss, accuracy, _, _, _, _, _ = evaluate_model(model, test_loader)
-
+    
     return accuracy  # We are optimizing for accuracy
-
 
 # Run BO-TPE optimization
 study = optuna.create_study(direction='maximize')
@@ -183,7 +174,7 @@ best_params = study.best_trial.params
 BUFFER_SIZE = best_params['buffer_size']
 ALPHA = best_params['alpha']
 LR = best_params['lr']
-BATCH_SIZE = best_params['batch_size']
+BATCH_SIZE = 1024  # Set batch size to 1024 directly
 
 # Train the final model with the best hyperparameters
 train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True)
