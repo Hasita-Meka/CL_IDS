@@ -15,6 +15,7 @@ import optuna  # For BO-TPE
 # Define constants
 NUM_EPOCHS = 30
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+BATCH_SIZE = 1024  # Set the batch size to 1024
 
 # Data Augmentation and Normalization
 transform = transforms.Compose([
@@ -38,7 +39,6 @@ model = model.to(DEVICE)
 
 # Loss function
 criterion = nn.CrossEntropyLoss()
-
 
 class Derpp:
     """Continual learning via Dark Experience Replay++."""
@@ -84,10 +84,8 @@ class Derpp:
 
         return tot_loss
 
-
 # Training function with Derpp
-def train_model_with_derpp(model, train_loader, criterion, optimizer, num_epochs, buffer_size=1000, alpha=0.5,
-                           beta=0.5):
+def train_model_with_derpp(model, train_loader, criterion, optimizer, num_epochs, buffer_size=1000, alpha=0.5, beta=0.5):
     derpp = Derpp(model, criterion, optimizer, buffer_size=buffer_size, alpha=alpha, beta=beta)
     model.train()
     train_loss = []
@@ -103,7 +101,6 @@ def train_model_with_derpp(model, train_loader, criterion, optimizer, num_epochs
         train_loss.append(avg_loss)
         print(f'Epoch [{epoch + 1}/{num_epochs}], Loss: {avg_loss:.4f}')
     return train_loss
-
 
 # Evaluation function (remains the same)
 def evaluate_model(model, test_loader):
@@ -133,16 +130,14 @@ def evaluate_model(model, test_loader):
 
     return avg_loss, accuracy, f1, precision, recall, auc_roc, cm
 
-
 # Optuna objective function for BO-TPE
 def objective(trial):
     # Hyperparameter space
-    BATCH_SIZE = trial.suggest_categorical('batch_size', [32, 64, 128, 256, 512])
     LEARNING_RATE = trial.suggest_loguniform('learning_rate', 1e-5, 1e-2)
     ALPHA = trial.suggest_uniform('alpha', 0.1, 1.0)
     BETA = trial.suggest_uniform('beta', 0.1, 1.0)
-
-    # DataLoader with new batch size
+    
+    # DataLoader with fixed batch size of 1024
     train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True)
     test_loader = DataLoader(test_data, batch_size=BATCH_SIZE, shuffle=False)
 
@@ -150,19 +145,17 @@ def objective(trial):
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
     # Train the model
-    train_loss = train_model_with_derpp(model, train_loader, criterion, optimizer, NUM_EPOCHS, buffer_size=1000,
-                                        alpha=ALPHA, beta=BETA)
-
+    train_loss = train_model_with_derpp(model, train_loader, criterion, optimizer, NUM_EPOCHS, buffer_size=1000, alpha=ALPHA, beta=BETA)
+    
     # Evaluate the model
     avg_loss, accuracy, f1, precision, recall, auc_roc, cm = evaluate_model(model, test_loader)
 
     # Optuna will minimize the loss
     return avg_loss
 
-
 # Run the BO-TPE optimization
 study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler())
-study.optimize(objective, n_trials=50)
+study.optimize(objective, n_trials=20)
 
 # Best hyperparameters
 print("Best hyperparameters: ", study.best_params)
@@ -171,7 +164,6 @@ print("Best hyperparameters: ", study.best_params)
 start_time = time.time()
 
 # Train and evaluate using the best hyperparameters
-BATCH_SIZE = study.best_params['batch_size']
 LEARNING_RATE = study.best_params['learning_rate']
 ALPHA = study.best_params['alpha']
 BETA = study.best_params['beta']
@@ -180,8 +172,7 @@ train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True)
 optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
 # Train the model using Derpp
-train_loss = train_model_with_derpp(model, train_loader, criterion, optimizer, NUM_EPOCHS, buffer_size=1000,
-                                    alpha=ALPHA, beta=BETA)
+train_loss = train_model_with_derpp(model, train_loader, criterion, optimizer, NUM_EPOCHS, buffer_size=1000, alpha=ALPHA, beta=BETA)
 
 # Evaluate the model
 avg_loss, accuracy, f1, precision, recall, auc_roc, cm = evaluate_model(model, test_loader)
