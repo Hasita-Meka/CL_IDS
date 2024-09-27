@@ -24,8 +24,8 @@ transform = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
 
-train_dir = '/kaggle/input/mnist-png/mnist_png/train'
-test_dir = '/kaggle/input/mnist-png/mnist_png/test'
+train_dir = 'Dataset/train'
+test_dir = 'Dataset/test'
 
 # Load datasets
 train_data = datasets.ImageFolder(train_dir, transform=transform)
