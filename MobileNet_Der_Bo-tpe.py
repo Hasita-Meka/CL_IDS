@@ -2,19 +2,22 @@ import os
 import time
 import torch
 import torchvision.transforms as transforms
-from torchvision.datasets import ImageFolder
+from torchvision import datasets
 from torch.utils.data import DataLoader
 from torch import nn, optim
-from torchvision.models import mobilenet_v2  # Import MobileNetV2
+from torchvision.models import mobilenet_v2
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, precision_score, recall_score, confusion_matrix
 import matplotlib.pyplot as plt
 import numpy as np
+from torch.nn import functional as F
 import optuna  # Import Optuna for hyperparameter optimization
-from torchvision import datasets, transforms
 
-# Define constants
+# Constants
+BATCH_SIZE = 1024
 NUM_EPOCHS = 30
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+BUFFER_SIZE = 1000
+ALPHA = 0.5
 
 # Data Augmentation and Normalization
 transform = transforms.Compose([
@@ -23,18 +26,108 @@ transform = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
 
+# Load datasets
 train_dir = 'Dataset/train'
 test_dir = 'Dataset/test'
 
-# Load datasets
 train_data = datasets.ImageFolder(train_dir, transform=transform)
 test_data = datasets.ImageFolder(test_dir, transform=transform)
 
-train_loader = DataLoader(train_data, batch_size=1024, shuffle=True)
-test_loader = DataLoader(test_data, batch_size=1024, shuffle=False)
+train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True)
+test_loader = DataLoader(test_data, batch_size=BATCH_SIZE, shuffle=False)
 
-# Function to train the model
-def train_model(model, train_loader, criterion, optimizer, scheduler, num_epochs):
+# Load MobileNetV2 model
+model = mobilenet_v2(pretrained=True)
+num_classes = len(train_data.classes)
+model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)
+model = model.to(DEVICE)
+
+# Loss and optimizer
+criterion = nn.CrossEntropyLoss()
+
+# Define the objective function for Optuna
+def objective(trial):
+    learning_rate = trial.suggest_loguniform("learning_rate", 1e-5, 1e-1)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+
+    # Instantiate Der model
+    der_model = Der(model=model, buffer_size=BUFFER_SIZE, alpha=ALPHA, optimizer=optimizer)
+    
+    # Train the model using Der
+    train_loss = train_model(model, train_loader, optimizer, NUM_EPOCHS, der_model)
+
+    # Evaluate the model
+    avg_loss, accuracy, f1, precision, recall, auc_roc, cm = evaluate_model(model, test_loader)
+
+    # Return the accuracy as the objective to maximize
+    return accuracy
+
+# Buffer class for experience replay
+class Buffer:
+    def __init__(self, buffer_size):
+        self.buffer_size = buffer_size
+        self.inputs = []
+        self.logits = []
+
+    def add_data(self, examples, logits):
+        for i in range(len(examples)):
+            if len(self.inputs) < self.buffer_size:
+                self.inputs.append(examples[i].cpu())
+                self.logits.append(logits[i].cpu())
+            else:
+                idx = np.random.randint(0, self.buffer_size)
+                self.inputs[idx] = examples[i].cpu()
+                self.logits[idx] = logits[i].cpu()
+
+    def get_data(self, batch_size, device):
+        indices = np.random.choice(len(self.inputs), batch_size, replace=False)
+        buffer_inputs = torch.stack([self.inputs[i] for i in indices]).to(device)
+        buffer_logits = torch.tensor(np.stack([self.logits[i] for i in indices])).to(device)
+        return buffer_inputs, buffer_logits
+
+    def is_empty(self):
+        return len(self.inputs) == 0
+
+# Der class for continual learning
+class Der:
+    def __init__(self, model, buffer_size, alpha, optimizer):
+        self.model = model
+        self.buffer = Buffer(buffer_size)
+        self.alpha = alpha
+        self.optimizer = optimizer
+
+    def observe(self, inputs, labels, not_aug_inputs):
+        self.optimizer.zero_grad()
+        tot_loss = 0
+
+        # Forward pass
+        outputs = self.model(inputs)
+
+        # Compute the primary loss
+        loss = criterion(outputs, labels)
+        loss.backward()
+        tot_loss += loss.item()
+
+        # Experience Replay
+        if not self.buffer.is_empty():
+            buf_inputs, buf_logits = self.buffer.get_data(BATCH_SIZE, DEVICE)
+            buf_outputs = self.model(buf_inputs)
+
+            # Compute MSE loss for buffered logits
+            loss_mse = self.alpha * F.mse_loss(buf_outputs, buf_logits)
+            loss_mse.backward()
+            tot_loss += loss_mse.item()
+
+        # Update the model parameters
+        self.optimizer.step()
+
+        # Add new data to buffer
+        self.buffer.add_data(not_aug_inputs, outputs.data)
+
+        return tot_loss
+
+# Training Function
+def train_model(model, train_loader, optimizer, num_epochs, der_model):
     model.train()
     train_loss = []
     for epoch in range(num_epochs):
@@ -42,21 +135,13 @@ def train_model(model, train_loader, criterion, optimizer, scheduler, num_epochs
         for images, labels in train_loader:
             images, labels = images.to(DEVICE), labels.to(DEVICE)
 
-            optimizer.zero_grad()
-            outputs = model(images)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
-
-            epoch_loss += loss.item()
+            # Der observation
+            loss = der_model.observe(images, labels, images)
+            epoch_loss += loss
 
         avg_loss = epoch_loss / len(train_loader)
         train_loss.append(avg_loss)
         print(f'Epoch [{epoch + 1}/{num_epochs}], Loss: {avg_loss:.4f}')
-
-        # Step the scheduler
-        scheduler.step()
-
     return train_loss
 
 # Function to evaluate the model
@@ -65,7 +150,6 @@ def evaluate_model(model, test_loader):
     all_preds = []
     all_labels = []
     test_loss = 0.0
-    criterion = nn.CrossEntropyLoss()
 
     with torch.no_grad():
         for images, labels in test_loader:
@@ -88,94 +172,46 @@ def evaluate_model(model, test_loader):
 
     return avg_loss, accuracy, f1, precision, recall, auc_roc, cm
 
-# Function to plot loss vs accuracy curves
-def plot_metrics(train_loss, accuracy_list):
-    epochs = range(1, len(train_loss) + 1)
+# Start timing
+start_time = time.time()
 
-    # Plotting Loss
-    plt.figure(figsize=(12, 5))
-    plt.subplot(1, 2, 1)
-    plt.plot(epochs, train_loss, 'b', label='Training loss')
-    plt.title('Training Loss')
-    plt.xlabel('Epochs')
-    plt.ylabel('Loss')
+# Create a study object and optimize
+study = optuna.create_study(sampler=optuna.samplers.TPESampler())
+study.optimize(objective, n_trials=50)
 
-    # Plotting Accuracy
-    plt.subplot(1, 2, 2)
-    plt.plot(epochs, accuracy_list, 'g', label='Accuracy')
-    plt.title('Accuracy over Epochs')
-    plt.xlabel('Epochs')
-    plt.ylabel('Accuracy')
+# Retrieve the best trial
+best_trial = study.best_trial
+print(f'Best Trial: {best_trial.value}')
+print(f'Best Hyperparameters: {best_trial.params}')
 
-    plt.show()
+# End timing
+end_time = time.time()
+time_taken = end_time - start_time
 
-# Define the objective function for Optuna
-def objective(trial):
-    # Hyperparameter tuning
-    batch_size = trial.suggest_int('batch_size', 16, 256)  # Hyperparameter: batch size
-    learning_rate = trial.suggest_loguniform('learning_rate', 1e-5, 1e-1)  # Hyperparameter: learning rate
+# Evaluate the best model using the best parameters found
+best_learning_rate = best_trial.params["learning_rate"]
+optimizer = optim.Adam(model.parameters(), lr=best_learning_rate)
+der_model = Der(model=model, buffer_size=BUFFER_SIZE, alpha=ALPHA, optimizer=optimizer)
 
-    # Load DataLoader with current hyperparameters
-    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
-    test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False)
+# Train the best model using Der
+train_loss = train_model(model, train_loader, optimizer, NUM_EPOCHS, der_model)
 
-    # Load MobileNetV2 model
-    model = mobilenet_v2(pretrained=True)
-    num_classes = len(train_data.classes)
-    model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)  # Modify the final layer
-    model = model.to(DEVICE)
+# Evaluate the model
+avg_loss, accuracy, f1, precision, recall, auc_roc, cm = evaluate_model(model, test_loader)
 
-    # Loss and optimizer
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+# Print performance metrics
+print(f'Average Loss: {avg_loss:.4f}')
+print(f'Accuracy: {accuracy:.4f}')
+print(f'F1 Score: {f1:.4f}')
+print(f'Precision: {precision:.4f}')
+print(f'Recall: {recall:.4f}')
+print(f'AUC-ROC: {auc_roc:.4f}')
+print(f'Time Taken: {time_taken:.2f} seconds')
+print('Confusion Matrix:\n', cm)
 
-    # Learning Rate Scheduler
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)  # Reduce LR by half every 5 epochs
-
-    # Train the model
-    train_loss = train_model(model, train_loader, criterion, optimizer, scheduler, NUM_EPOCHS)
-
-    # Evaluate the model
-    avg_loss, accuracy, f1, precision, recall, auc_roc, cm = evaluate_model(model, test_loader)
-
-    # Return the accuracy to optimize
-    return accuracy
-
-# Start the Optuna study
-study = optuna.create_study(direction='maximize')
-study.optimize(objective, n_trials=50)  # You can change the number of trials as needed
-
-# Print the best hyperparameters
-print("Best hyperparameters:", study.best_params)
-
-# Train the final model with the best hyperparameters
-best_params = study.best_params
-final_train_loader = DataLoader(train_data, batch_size=best_params['batch_size'], shuffle=True)
-final_test_loader = DataLoader(test_data, batch_size=best_params['batch_size'], shuffle=False)
-
-final_model = mobilenet_v2(pretrained=True)
-final_model.classifier[1] = nn.Linear(final_model.classifier[1].in_features, num_classes)
-final_model = final_model.to(DEVICE)
-
-final_criterion = nn.CrossEntropyLoss()
-final_optimizer = optim.Adam(final_model.parameters(), lr=best_params['learning_rate'])
-final_scheduler = optim.lr_scheduler.StepLR(final_optimizer, step_size=5, gamma=0.5)
-
-# Train the final model
-final_train_loss = train_model(final_model, final_train_loader, final_criterion, final_optimizer, final_scheduler, NUM_EPOCHS)
-
-# Evaluate the final model
-final_avg_loss, final_accuracy, final_f1, final_precision, final_recall, final_auc_roc, final_cm = evaluate_model(final_model, final_test_loader)
-
-# Print performance metrics for the final model
-print(f'Final Average Loss: {final_avg_loss:.4f}')
-print(f'Final Accuracy: {final_accuracy:.4f}')
-print(f'Final F1 Score: {final_f1:.4f}')
-print(f'Final Precision: {final_precision:.4f}')
-print(f'Final Recall: {final_recall:.4f}')
-print(f'Final AUC-ROC: {final_auc_roc:.4f}')
-print('Final Confusion Matrix:\n', final_cm)
-
-# Plot loss vs accuracy curves for the final model
-final_accuracy_list = [final_accuracy] * NUM_EPOCHS  # For demonstration, using constant accuracy
-plot_metrics(final_train_loss, final_accuracy_list)
+# Plot loss vs accuracy curves
+accuracy_list = [accuracy] * NUM_EPOCHS
+plt.plot(train_loss, label="Training Loss")
+plt.plot(accuracy_list, label="Accuracy")
+plt.legend()
+plt.show()
