@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from collections import deque
 import optuna  # For BO-TPE
+from torchvision import datasets, transforms
 
 # Define constants
 NUM_EPOCHS = 30
@@ -39,6 +40,33 @@ model = model.to(DEVICE)
 
 # Loss function
 criterion = nn.CrossEntropyLoss()
+
+class Buffer:
+    def __init__(self, buffer_size):
+        self.buffer_size = buffer_size
+        self.data = []
+        self.labels = []
+        self.logits = []
+
+    def is_empty(self):
+        return len(self.data) == 0
+
+    def add_data(self, examples, labels, logits):
+        self.data.extend(examples)
+        self.labels.extend(labels)
+        self.logits.extend(logits)
+
+        if len(self.data) > self.buffer_size:
+            self.data = self.data[-self.buffer_size:]
+            self.labels = self.labels[-self.buffer_size:]
+            self.logits = self.logits[-self.buffer_size:]
+
+    def get_data(self, minibatch_size, device):
+        idx = np.random.choice(len(self.data), minibatch_size, replace=False)
+        buf_inputs = torch.stack([self.data[i] for i in idx]).to(device)
+        buf_labels = torch.tensor([self.labels[i] for i in idx]).to(device)
+        buf_logits = torch.stack([self.logits[i] for i in idx]).to(device)
+        return buf_inputs, buf_labels, buf_logits
 
 class Derpp:
     """Continual learning via Dark Experience Replay++."""
@@ -155,7 +183,7 @@ def objective(trial):
 
 # Run the BO-TPE optimization
 study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler())
-study.optimize(objective, n_trials=20)
+study.optimize(objective, n_trials=50)
 
 # Best hyperparameters
 print("Best hyperparameters: ", study.best_params)
