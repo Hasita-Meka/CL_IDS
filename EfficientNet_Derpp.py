@@ -9,8 +9,36 @@ from torchvision.models import efficientnet_b0
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, precision_score, recall_score, confusion_matrix
 import matplotlib.pyplot as plt
 import numpy as np
-from collections import deque
 from torchvision import datasets, transforms
+
+# Define Buffer class
+class Buffer:
+    def __init__(self, buffer_size):
+        self.buffer_size = buffer_size
+        self.data = []
+        self.labels = []
+        self.logits = []
+
+    def is_empty(self):
+        return len(self.data) == 0
+
+    def add_data(self, examples, labels, logits):
+        self.data.extend(examples)
+        self.labels.extend(labels)
+        self.logits.extend(logits)
+
+        if len(self.data) > self.buffer_size:
+            self.data = self.data[-self.buffer_size:]
+            self.labels = self.labels[-self.buffer_size:]
+            self.logits = self.logits[-self.buffer_size:]
+
+    def get_data(self, minibatch_size, device):
+        idx = np.random.choice(len(self.data), minibatch_size, replace=False)
+        buf_inputs = torch.stack([self.data[i] for i in idx]).to(device)
+        buf_labels = torch.tensor([self.labels[i] for i in idx]).to(device)
+        buf_logits = torch.stack([self.logits[i] for i in idx]).to(device)
+        return buf_inputs, buf_labels, buf_logits
+
 
 # Define constants
 BATCH_SIZE = 1024  # Batch size for training
@@ -53,7 +81,7 @@ class Derpp:
         self.model = model
         self.criterion = criterion
         self.optimizer = optimizer
-        self.buffer = deque(maxlen=buffer_size)
+        self.buffer = Buffer(buffer_size)  # Use the Buffer class
         self.alpha = alpha
         self.beta = beta
 
@@ -66,27 +94,23 @@ class Derpp:
         tot_loss = loss.item()
 
         # Dark Experience Replay
-        if self.buffer:
-            buf_inputs, buf_labels, buf_logits = zip(*self.buffer)
-            buf_inputs = torch.stack(buf_inputs).to(DEVICE)
-            buf_labels = torch.tensor(buf_labels).to(DEVICE)
-            buf_logits = torch.stack(buf_logits).to(DEVICE)
-
+        if not self.buffer.is_empty():
+            buf_inputs, buf_labels, buf_logits = self.buffer.get_data(len(inputs), DEVICE)
             # MSE Loss on buffered logits
             buf_outputs = self.model(buf_inputs)
             loss_mse = self.alpha * nn.MSELoss()(buf_outputs, buf_logits)
-            loss_mse.backward()
+            loss_mse.backward(retain_graph=True)  # Keep the graph for the next backward pass
             tot_loss += loss_mse.item()
 
             # Cross-Entropy Loss on buffered labels
             loss_ce = self.beta * self.criterion(buf_outputs, buf_labels)
-            loss_ce.backward()
+            loss_ce.backward()  # No need to retain graph here
             tot_loss += loss_ce.item()
 
         self.optimizer.step()
 
         # Store the current inputs, labels, and logits in the buffer
-        self.buffer.extend(zip(not_aug_inputs, labels.cpu().numpy(), outputs.data.cpu()))
+        self.buffer.add_data(not_aug_inputs, labels.cpu().numpy(), outputs.data.cpu())
 
         return tot_loss
 
