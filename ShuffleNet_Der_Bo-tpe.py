@@ -86,7 +86,7 @@ class Der:
         self.alpha = alpha
         self.optimizer = optimizer
 
-    def observe(self, inputs, labels, not_aug_inputs):
+    def observe(self, inputs, labels, not_aug_inputs, criterion):  # Add criterion here
         self.optimizer.zero_grad()
         tot_loss = 0
 
@@ -117,8 +117,9 @@ class Der:
         return tot_loss
 
 
+
 # Training Function
-def train_model(model, train_loader, optimizer, num_epochs, der_model):
+def train_model(model, train_loader, optimizer, num_epochs, der_model, criterion):  # Add criterion here
     model.train()
     train_loss = []
     for epoch in range(num_epochs):
@@ -127,13 +128,14 @@ def train_model(model, train_loader, optimizer, num_epochs, der_model):
             images, labels = images.to(DEVICE), labels.to(DEVICE)
 
             # Der observation
-            loss = der_model.observe(images, labels, images)
+            loss = der_model.observe(images, labels, images, criterion)  # Pass criterion
             epoch_loss += loss
 
         avg_loss = epoch_loss / len(train_loader)
         train_loss.append(avg_loss)
         print(f'Epoch [{epoch + 1}/{num_epochs}], Loss: {avg_loss:.4f}')
     return train_loss
+
 
 
 # Evaluation function
@@ -174,12 +176,13 @@ def objective(trial):
     der_model = Der(model=model, buffer_size=BUFFER_SIZE, alpha=ALPHA, optimizer=optimizer)
 
     # Train the model
-    train_loss = train_model(model, train_loader, optimizer, NUM_EPOCHS, der_model)
+    train_loss = train_model(model, train_loader, optimizer, NUM_EPOCHS, der_model, criterion)  # Pass criterion
 
     # Evaluate the model
     avg_loss, accuracy, f1, precision, recall, auc_roc, cm = evaluate_model(model, test_loader)
 
     return accuracy  # Return the metric to optimize
+
 
 
 # Start optimization
