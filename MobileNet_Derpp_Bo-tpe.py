@@ -13,11 +13,15 @@ import numpy as np
 from torchvision import datasets
 import torch.nn.functional as F
 import optuna  # Import Optuna for hyperparameter optimization
+import json  # Import JSON for saving hyperparameters
+from pathlib import Path  # Import Path for file operations
 
 # Define constants
-BATCH_SIZE = 1024  # Batch size for training
+BATCH_SIZE = 512 # Batch size for training
 NUM_EPOCHS = 30
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+output_folder = 'output_2'  # Define output folder
+os.makedirs(output_folder, exist_ok=True)
 
 # Data Augmentation and Normalization
 transform = transforms.Compose([
@@ -27,7 +31,7 @@ transform = transforms.Compose([
 ])
 
 train_dir = 'Dataset/train'
-test_dir = 'Dataset/test'
+test_dir = 'Dataset/test
 
 # Load datasets
 train_data = datasets.ImageFolder(train_dir, transform=transform)
@@ -38,7 +42,7 @@ test_loader = DataLoader(test_data, batch_size=BATCH_SIZE, shuffle=False)
 
 # Load MobileNetV2 model
 def create_model(learning_rate):
-    model = mobilenet_v2(pretrained=True)
+    model = mobilenet_v2(weights='DEFAULT')
     num_classes = len(train_data.classes)
     model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)  # Modify the final layer
     model = model.to(DEVICE)
@@ -112,24 +116,36 @@ class DerppModel:
         return tot_loss
 
 
-# Function to train the model
-def train_model(model, train_loader, num_epochs, learning_rate):
+# Function to train the model using DERPP
+def train_model_with_derpp(model, train_loader, criterion, optimizer, num_epochs, buffer_size=1000, alpha=0.5, beta=0.5):
+    derpp = DerppModel(model, optimizer.param_groups[0]['lr'], alpha=alpha, beta=beta, buffer_size=buffer_size)
     model.train()
     train_loss = []
-    derpp_model = DerppModel(model, learning_rate)
+    train_accuracy = []
 
     for epoch in range(num_epochs):
         epoch_loss = 0.0
+        correct = 0
+        total = 0
         for images, labels in train_loader:
             images, labels = images.to(DEVICE), labels.to(DEVICE)
             not_aug_images = images.clone()  # Store original images for DER++
-            loss = derpp_model.observe(images, labels, not_aug_images)
+            loss = derpp.observe(images, labels, not_aug_images)
             epoch_loss += loss
+            
+            # Calculate accuracy
+            outputs = derpp.model(images)
+            _, preds = torch.max(outputs, 1)
+            total += labels.size(0)
+            correct += (preds == labels).sum().item()
 
         avg_loss = epoch_loss / len(train_loader)
+        accuracy = correct / total
         train_loss.append(avg_loss)
-        print(f'Epoch [{epoch + 1}/{num_epochs}], Loss: {avg_loss:.4f}')
-    return train_loss
+        train_accuracy.append(accuracy)
+        print(f'Epoch [{epoch + 1}/{num_epochs}], Loss: {avg_loss:.4f}, Accuracy: {accuracy:.4f}')
+
+    return train_loss, train_accuracy
 
 
 # Function to evaluate the model
@@ -172,6 +188,8 @@ def plot_metrics(train_loss, accuracy_list):
     plt.title('Training Loss')
     plt.xlabel('Epochs')
     plt.ylabel('Loss')
+    plt.savefig(os.path.join(output_folder, 'train_loss_plot.png'))
+    plt.close()
 
     # Plotting Accuracy
     plt.subplot(1, 2, 2)
@@ -179,14 +197,16 @@ def plot_metrics(train_loss, accuracy_list):
     plt.title('Accuracy over Epochs')
     plt.xlabel('Epochs')
     plt.ylabel('Accuracy')
-
-    plt.show()
+    plt.savefig(os.path.join(output_folder, 'train_accuracy_plot.png'))
+    plt.close()
 
 
 # Define the objective function for Optuna
 def objective(trial):
     # Suggest hyperparameters
-    learning_rate = trial.suggest_loguniform('learning_rate', 1e-5, 1e-1)
+    LEARNING_RATE = trial.suggest_float('learning_rate', 1e-5, 1e-2, log=True)
+    ALPHA = trial.suggest_float('alpha', 0.1, 1.0)
+    BETA = trial.suggest_float('beta', 0.1, 1.0)
 
     # Load datasets with the suggested batch size
     train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True)
@@ -196,7 +216,7 @@ def objective(trial):
     model, optimizer = create_model(learning_rate)
 
     # Train the model
-    train_loss = train_model(model, train_loader, NUM_EPOCHS, learning_rate)
+    train_loss, train_accuracy = train_model_with_derpp(model, train_loader, criterion, optimizer, NUM_EPOCHS, buffer_size=1000, alpha=0.5, beta=0.5)
 
     # Evaluate the model
     avg_loss, accuracy, f1, precision, recall, auc_roc, cm = evaluate_model(model, test_loader)
@@ -211,33 +231,54 @@ study.optimize(objective, n_trials=50)
 # Print the best hyperparameters
 print("Best hyperparameters: ", study.best_params)
 
+best_hyperparams_file = os.path.join(output_folder, 'best_hyperparameters.json')
+with open(best_hyperparams_file, 'w') as f:
+    json.dump(study.best_params, f)
+
 # Start timing
 start_time = time.time()
 
 # Train the model with the best hyperparameters
-best_learning_rate = study.best_params['learning_rate']
-best_batch_size = study.best_params['batch_size']
-final_model, final_optimizer = create_model(best_learning_rate)
+LEARNING_RATE = study.best_params['learning_rate']
+ALPHA = study.best_params['alpha']
+BETA = study.best_params['beta']
 
-final_train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True)
-final_train_loss = train_model(final_model, final_train_loader, NUM_EPOCHS)
+train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True)
+optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+
+# Train the model using Derpp
+train_loss, train_accuracy = train_model_with_derpp(model, train_loader, criterion, optimizer, NUM_EPOCHS, buffer_size=1000, alpha=ALPHA, beta=BETA)
 
 # Evaluate the model
-avg_loss, accuracy, f1, precision, recall, auc_roc, cm = evaluate_model(final_model, test_loader)
+avg_loss, accuracy, f1, precision, recall, auc_roc, cm = evaluate_model(model, test_loader)
 
-# End timing
+# Stop timing
 end_time = time.time()
-time_taken = end_time - start_time
+runtime = end_time - start_time
 
-# Print performance metrics
-print(f'Average Loss: {avg_loss:.4f}')
-print(f'Accuracy: {accuracy:.4f}')
-print(f'F1 Score: {f1:.4f}')
-print(f'Precision: {precision:.4f}')
-print(f'Recall: {recall:.4f}')
-print(f'AUC-ROC: {auc_roc:.4f}')
-print(f'Time Taken: {time_taken:.2f} seconds')
-print('Confusion Matrix:\n', cm)
+# Save the model's state dictionary
+model_weights_file = os.path.join(output_folder, 'model_weights.pth')
+torch.save(model.state_dict(), model_weights_file)
 
-# Plot loss vs accuracy curves
-accuracy_list = [accuracy]
+# Save training loss
+train_loss_file = os.path.join(output_folder, 'train_loss.json')
+with open(train_loss_file, 'w') as f:
+    json.dump(train_loss, f)
+
+# Save results to JSON file
+results = {
+    "avg_loss": avg_loss,
+    "accuracy": accuracy,
+    "f1_score": f1,
+    "precision": precision,
+    "recall": recall,
+    "auc_roc": auc_roc,
+    "confusion_matrix": cm.tolist(),
+    "runtime": runtime
+}
+
+with open(os.path.join(output_folder, 'results.json'), 'w') as f:
+    json.dump(results, f)
+
+# Plot metrics
+plot_metrics(train_loss, train_accuracy)
