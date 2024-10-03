@@ -17,7 +17,7 @@ from torchvision import datasets, transforms
 # Define constants
 NUM_EPOCHS = 30
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-BATCH_SIZE = 512
+BATCH_SIZE = 256
 
 # Data Augmentation and Normalization
 transform = transforms.Compose([
