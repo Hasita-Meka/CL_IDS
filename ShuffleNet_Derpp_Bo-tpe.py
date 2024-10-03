@@ -14,7 +14,7 @@ import optuna  # Add this import for Optuna
 from torchvision import datasets
 
 # Define constants
-BATCH_SIZE = 512
+BATCH_SIZE = 256
 NUM_EPOCHS = 30
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 BUFFER_SIZE = 1000  # Define buffer size
